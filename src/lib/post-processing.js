@@ -1,3 +1,5 @@
+import { drawWarpedPlate } from "@/lib/utils";
+
 export const DEFAULT_LOCAL_EDIT_RECIPE = {
   exposure: 0,
   brightness: 0,
@@ -100,6 +102,79 @@ export function applyRecipeToImageData(imageData, localRecipe, globalRecipe, lut
   }
 
   return imageData;
+}
+
+export function resolveEffectiveGlobalLook(photo, globalRecipe, lut) {
+  const shouldApplyGlobal = !photo?.disableGlobalLook;
+  return {
+    globalRecipe: shouldApplyGlobal ? globalRecipe ?? DEFAULT_GLOBAL_LOOK_RECIPE : DEFAULT_GLOBAL_LOOK_RECIPE,
+    lut: shouldApplyGlobal ? lut ?? null : null,
+  };
+}
+
+export function applyPostEditsToCanvas(canvas, photo, globalRecipe, lut) {
+  const activeLocalRecipe = photo?.localEditRecipe ?? DEFAULT_LOCAL_EDIT_RECIPE;
+  const effectiveGlobal = resolveEffectiveGlobalLook(photo, globalRecipe, lut);
+  const hasLocal = hasMeaningfulAdjustments(activeLocalRecipe, DEFAULT_LOCAL_EDIT_RECIPE);
+  const hasGlobal =
+    hasMeaningfulAdjustments(effectiveGlobal.globalRecipe, DEFAULT_GLOBAL_LOOK_RECIPE) ||
+    Boolean(effectiveGlobal.lut);
+
+  if (!hasLocal && !hasGlobal) return;
+
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const processed = applyRecipeToImageData(
+    imageData,
+    activeLocalRecipe,
+    effectiveGlobal.globalRecipe,
+    effectiveGlobal.lut,
+  );
+  ctx.putImageData(processed, 0, 0);
+}
+
+export function renderPhotoToCanvas({
+  canvas,
+  sourceImage,
+  plateImage,
+  photo,
+  globalRecipe,
+  lut,
+  maxDimension = null,
+}) {
+  if (!canvas || !sourceImage || !photo) return null;
+
+  const scale =
+    maxDimension && Number.isFinite(maxDimension) && maxDimension > 0
+      ? Math.min(maxDimension / Math.max(sourceImage.width, sourceImage.height), 1)
+      : 1;
+
+  const width = Math.max(1, Math.round(sourceImage.width * scale));
+  const height = Math.max(1, Math.round(sourceImage.height * scale));
+
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.clearRect(0, 0, width, height);
+  ctx.drawImage(sourceImage, 0, 0, width, height);
+
+  if (plateImage && photo.points?.length === 4) {
+    const scaledPhoto = {
+      ...photo,
+      points: photo.points.map((point) => ({
+        x: point.x * scale,
+        y: point.y * scale,
+      })),
+    };
+    drawWarpedPlate(ctx, plateImage, scaledPhoto.points);
+  }
+
+  applyPostEditsToCanvas(canvas, photo, globalRecipe, lut);
+
+  return { width, height, scale };
 }
 
 function applyLocalRecipe(color, recipe = DEFAULT_LOCAL_EDIT_RECIPE) {

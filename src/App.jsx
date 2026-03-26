@@ -10,17 +10,17 @@ import {
   IMAGE_REGEX,
   clamp,
   createPhotoRecord,
-  drawWarpedPlate,
   findNearestPointIndex,
   revokePhotoUrls,
 } from "@/lib/utils";
 import {
-  applyRecipeToImageData,
+  applyPostEditsToCanvas,
   DEFAULT_GLOBAL_LOOK_RECIPE,
   DEFAULT_LOCAL_EDIT_RECIPE,
   hasMeaningfulAdjustments,
   makeGlobalLookRecipe,
   makeLocalEditRecipe,
+  renderPhotoToCanvas,
 } from "@/lib/post-processing";
 
 const PostEditorModule = lazy(() => import("@/components/post-editor/module.jsx"));
@@ -48,7 +48,7 @@ export default function App() {
   const [customLuts, setCustomLuts] = useState([]);
   const [customPresets, setCustomPresets] = useState([]);
   const [localClipboard, setLocalClipboard] = useState(null);
-  const [editorPreviewUrl, setEditorPreviewUrl] = useState(null);
+  const [pointHistory, setPointHistory] = useState({});
 
   const canvasRef = useRef(null);
   const previewCanvasRef = useRef(null);
@@ -60,6 +60,7 @@ export default function App() {
   const photoInputRef = useRef(null);
   const canvasScrollRef = useRef(null);
   const panStateRef = useRef({ pointerX: 0, pointerY: 0, scrollLeft: 0, scrollTop: 0 });
+  const dragHistoryCommittedRef = useRef(false);
 
   const activePhoto = photos.find((photo) => photo.id === activeId) ?? null;
   const deferredPhotos = useDeferredValue(photos);
@@ -86,8 +87,18 @@ export default function App() {
   }, [activePhoto?.path]);
 
   const getFitZoom = () => {
-    if (!canvasRef.current || activeDim.w <= 0) return 1;
-    return canvasRef.current.getBoundingClientRect().width / activeDim.w;
+    const container = canvasScrollRef.current;
+    if (!container || activeDim.w <= 0 || activeDim.h <= 0) return 1;
+
+    const computedStyle = window.getComputedStyle(container);
+    const paddingX = Number.parseFloat(computedStyle.paddingLeft || "0") + Number.parseFloat(computedStyle.paddingRight || "0");
+    const paddingY = Number.parseFloat(computedStyle.paddingTop || "0") + Number.parseFloat(computedStyle.paddingBottom || "0");
+
+    const availableWidth = Math.max(container.clientWidth - paddingX, 1);
+    const availableHeight = Math.max(container.clientHeight - paddingY, 1);
+
+    const fitScale = Math.min(availableWidth / activeDim.w, availableHeight / activeDim.h);
+    return Math.max(fitScale, 0.05);
   };
 
   const resolveZoomValue = (value) => (value === 0 ? getFitZoom() : value);
@@ -105,12 +116,6 @@ export default function App() {
     photosRef.current = photos;
   }, [photos]);
 
-  useEffect(() => {
-    if (!isPostEditorOpen || !canvasRef.current || !activePhoto) return;
-    const nextPreviewUrl = canvasRef.current.toDataURL("image/jpeg", 0.92);
-    setEditorPreviewUrl(nextPreviewUrl);
-  }, [isPostEditorOpen, activePhoto, globalLookRecipe, activeLut, selectedPointIndex, activePhoto?.localEditRecipe, activePhoto?.disableGlobalLook]);
-
   const showFeedback = (type, message) => {
     setFeedback({ type, message });
   };
@@ -124,6 +129,25 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (event) => {
       if (event.key === "Shift") setIsShiftDown(true);
+      if (event.key === "Escape") {
+        setSelectedPointIndex(-1);
+        setDraggingPointIndex(-1);
+        setIsPanning(false);
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          redoPoints();
+        } else {
+          undoPoints();
+        }
+      }
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedPointIndex >= 0 && activePhoto?.points[selectedPointIndex]) {
+        event.preventDefault();
+        pushPointHistorySnapshot(activePhoto.id, activePhoto.points.filter((_, index) => index !== selectedPointIndex));
+        applyPointsToPhoto(activePhoto.id, activePhoto.points.filter((_, index) => index !== selectedPointIndex));
+        setSelectedPointIndex(-1);
+      }
       if (event.code === "Space" && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName ?? "")) {
         event.preventDefault();
         setIsSpaceDown(true);
@@ -162,23 +186,7 @@ export default function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [selectedPointIndex, activePhoto]);
-
-  useEffect(() => {
-    const container = canvasScrollRef.current;
-    if (!container) return undefined;
-
-    const handleWheel = (event) => {
-      if (!event.ctrlKey) return;
-      event.preventDefault();
-      const direction = event.deltaY < 0 ? 1 : -1;
-      const intensity = clamp(Math.abs(event.deltaY) / 220, 0.2, 0.55);
-      applyZoomDelta(direction, intensity);
-    };
-
-    container.addEventListener("wheel", handleWheel, { passive: false });
-    return () => container.removeEventListener("wheel", handleWheel);
-  }, [activeDim.w, zoom]);
+  }, [selectedPointIndex, activePhoto, pointHistory]);
 
   useEffect(() => {
     if (!plateImgData) {
@@ -204,6 +212,7 @@ export default function App() {
       setActiveImageObj(img);
       setActiveDim({ w: img.width, h: img.height });
       setZoom(0);
+      setMousePos({ x: img.width / 2, y: img.height / 2 });
     };
     img.src = activePhoto.url;
   }, [activePhoto]);
@@ -213,6 +222,12 @@ export default function App() {
       setSelectedPointIndex(-1);
     }
   }, [activePhoto, selectedPointIndex]);
+
+  useEffect(() => {
+    if (zoom !== 0 || !canvasScrollRef.current) return;
+    canvasScrollRef.current.scrollLeft = 0;
+    canvasScrollRef.current.scrollTop = 0;
+  }, [zoom, activeId]);
 
   useEffect(() => {
     if (!activeImageObj || !canvasRef.current || !previewCanvasRef.current || !activePhoto) return;
@@ -226,15 +241,14 @@ export default function App() {
       preview.height = activeImageObj.height;
     }
 
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(activeImageObj, 0, 0);
-
-    if (activePhoto.points.length === 4 && plateImgObj) {
-      drawWarpedPlate(ctx, plateImgObj, activePhoto.points);
-    }
-
-    applyPostEditsToCanvas(canvas, activePhoto);
+    renderPhotoToCanvas({
+      canvas,
+      sourceImage: activeImageObj,
+      plateImage: plateImgObj,
+      photo: activePhoto,
+      globalRecipe: globalLookRecipe,
+      lut: activeLut,
+    });
   }, [activeImageObj, activePhoto, plateImgObj, globalLookRecipe, activeLut]);
 
   useEffect(() => {
@@ -284,6 +298,28 @@ export default function App() {
       ctx.fillText(String(index + 1), point.x + fontSize * 0.8, point.y - fontSize * 0.6);
     });
   }, [activeImageObj, activePhoto, mousePos, selectedPointIndex]);
+
+  useEffect(() => {
+    const previewCanvas = previewCanvasRef.current;
+    const canvasScroll = canvasScrollRef.current;
+    if (!previewCanvas && !canvasScroll) return undefined;
+
+    const nativeWheelHandler = (event) => {
+      if (!activePhoto || !event.ctrlKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const direction = event.deltaY < 0 ? 1 : -1;
+      const intensity = clamp(Math.abs(event.deltaY) / 320, 0.14, 0.35);
+      applyZoomDelta(direction, intensity);
+    };
+
+    previewCanvas?.addEventListener("wheel", nativeWheelHandler, { passive: false });
+    canvasScroll?.addEventListener("wheel", nativeWheelHandler, { passive: false });
+    return () => {
+      previewCanvas?.removeEventListener("wheel", nativeWheelHandler);
+      canvasScroll?.removeEventListener("wheel", nativeWheelHandler);
+    };
+  }, [activePhoto, activeDim.w, activeDim.h, applyZoomDelta]);
 
   useEffect(() => {
     if (!mousePos || !lupaCanvasRef.current || !canvasRef.current || !previewCanvasRef.current) return;
@@ -341,6 +377,74 @@ export default function App() {
     );
   };
 
+  const pushPointHistorySnapshot = (photoId, nextPoints) => {
+    setPointHistory((current) => {
+      const entry = current[photoId] ?? { undo: [], redo: [] };
+      const previousPoints = photosRef.current.find((photo) => photo.id === photoId)?.points ?? [];
+      if (JSON.stringify(previousPoints) === JSON.stringify(nextPoints)) return current;
+
+      return {
+        ...current,
+        [photoId]: {
+          undo: [...entry.undo, previousPoints.map((point) => ({ ...point }))],
+          redo: [],
+        },
+      };
+    });
+  };
+
+  const applyPointsToPhoto = (photoId, nextPoints) => {
+    setPhotos((current) =>
+      current.map((photo) =>
+        photo.id === photoId
+          ? {
+              ...photo,
+              points: nextPoints.map((point) => ({ ...point })),
+              saved: false,
+            }
+          : photo,
+      ),
+    );
+  };
+
+  const undoPoints = () => {
+    if (!activePhoto) return;
+    const historyEntry = pointHistory[activePhoto.id];
+    if (!historyEntry || historyEntry.undo.length === 0) return;
+
+    const previousSnapshot = historyEntry.undo[historyEntry.undo.length - 1];
+    const currentPoints = activePhoto.points.map((point) => ({ ...point }));
+
+    applyPointsToPhoto(activePhoto.id, previousSnapshot);
+    setSelectedPointIndex(-1);
+    setPointHistory((current) => ({
+      ...current,
+      [activePhoto.id]: {
+        undo: current[activePhoto.id].undo.slice(0, -1),
+        redo: [...current[activePhoto.id].redo, currentPoints],
+      },
+    }));
+  };
+
+  const redoPoints = () => {
+    if (!activePhoto) return;
+    const historyEntry = pointHistory[activePhoto.id];
+    if (!historyEntry || historyEntry.redo.length === 0) return;
+
+    const nextSnapshot = historyEntry.redo[historyEntry.redo.length - 1];
+    const currentPoints = activePhoto.points.map((point) => ({ ...point }));
+
+    applyPointsToPhoto(activePhoto.id, nextSnapshot);
+    setSelectedPointIndex(-1);
+    setPointHistory((current) => ({
+      ...current,
+      [activePhoto.id]: {
+        undo: [...current[activePhoto.id].undo, currentPoints],
+        redo: current[activePhoto.id].redo.slice(0, -1),
+      },
+    }));
+  };
+
   const getCanvasCoords = (event) => {
     const canvas = previewCanvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
@@ -372,6 +476,14 @@ export default function App() {
 
   const moveSelectedPoint = (dx, dy) => {
     if (!activePhoto || selectedPointIndex < 0 || !activePhoto.points[selectedPointIndex]) return;
+    pushPointHistorySnapshot(
+      activePhoto.id,
+      activePhoto.points.map((point, index) =>
+        index === selectedPointIndex
+          ? constrainPointToCanvas({ x: point.x + dx, y: point.y + dy })
+          : point,
+      ),
+    );
     updateActivePhoto((photo) => ({
       ...photo,
       saved: false,
@@ -429,6 +541,7 @@ export default function App() {
 
   const clearPoints = () => {
     if (!activePhoto) return;
+    pushPointHistorySnapshot(activePhoto.id, []);
     setSelectedPointIndex(-1);
     updateActivePhoto((photo) => ({ ...photo, points: [], saved: false }));
   };
@@ -480,6 +593,7 @@ export default function App() {
     if (activePhoto.points.length >= 4) return;
 
     const snapped = constrainPointToCanvas(getSnappedPoint(rawPoint, activePhoto.points));
+    pushPointHistorySnapshot(activePhoto.id, [...activePhoto.points, snapped]);
     updateActivePhoto((photo) => ({
       ...photo,
       saved: false,
@@ -513,6 +627,7 @@ export default function App() {
     if (nearestIndex >= 0) {
       setSelectedPointIndex(nearestIndex);
       setDraggingPointIndex(nearestIndex);
+      dragHistoryCommittedRef.current = false;
       event.currentTarget.setPointerCapture?.(event.pointerId);
     }
   };
@@ -531,6 +646,15 @@ export default function App() {
     setMousePos(point);
 
     if (draggingPointIndex < 0) return;
+    if (!dragHistoryCommittedRef.current) {
+      pushPointHistorySnapshot(
+        activePhoto.id,
+        activePhoto.points.map((currentPoint, index) =>
+          index === draggingPointIndex ? point : currentPoint,
+        ),
+      );
+      dragHistoryCommittedRef.current = true;
+    }
 
     updateActivePhoto((photo) => ({
       ...photo,
@@ -551,6 +675,7 @@ export default function App() {
     if (draggingPointIndex >= 0) {
       event.currentTarget.releasePointerCapture?.(event.pointerId);
     }
+    dragHistoryCommittedRef.current = false;
     setDraggingPointIndex(-1);
   };
 
@@ -627,27 +752,6 @@ export default function App() {
     showFeedback("success", `Look global habilitado em ${selectedPhotoIds.length} foto(s).`);
   };
 
-  const applyPostEditsToCanvas = (canvas, photo) => {
-    const activeLocalRecipe = photo.localEditRecipe ?? DEFAULT_LOCAL_EDIT_RECIPE;
-    const shouldApplyGlobal = !photo.disableGlobalLook;
-    const effectiveGlobalRecipe = shouldApplyGlobal ? globalLookRecipe : DEFAULT_GLOBAL_LOOK_RECIPE;
-    const effectiveLut = shouldApplyGlobal ? activeLut : null;
-
-    const hasLocal = hasMeaningfulAdjustments(activeLocalRecipe, DEFAULT_LOCAL_EDIT_RECIPE);
-    const hasGlobal = hasMeaningfulAdjustments(effectiveGlobalRecipe, DEFAULT_GLOBAL_LOOK_RECIPE) || Boolean(effectiveLut);
-    if (!hasLocal && !hasGlobal) return;
-
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const processed = applyRecipeToImageData(
-      imageData,
-      activeLocalRecipe,
-      effectiveGlobalRecipe,
-      effectiveLut,
-    );
-    ctx.putImageData(processed, 0, 0);
-  };
-
   const exportStructuredZip = async () => {
     if (!plateImgObj) {
       setFeedback({ type: "error", message: "Envie a imagem da placa antes de exportar." });
@@ -675,10 +779,14 @@ export default function App() {
         const canvas = document.createElement("canvas");
         canvas.width = sourceImage.width;
         canvas.height = sourceImage.height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(sourceImage, 0, 0);
-        drawWarpedPlate(ctx, plateImgObj, photo.points);
-        applyPostEditsToCanvas(canvas, photo);
+        renderPhotoToCanvas({
+          canvas,
+          sourceImage,
+          plateImage: plateImgObj,
+          photo,
+          globalRecipe: globalLookRecipe,
+          lut: activeLut,
+        });
 
         const blob = await new Promise((resolve, reject) => {
           canvas.toBlob(
@@ -826,10 +934,12 @@ export default function App() {
             setCustomPresets={setCustomPresets}
             localClipboard={localClipboard}
             setLocalClipboard={setLocalClipboard}
-            activePreviewUrl={editorPreviewUrl}
+            plateImgObj={plateImgObj}
+            globalLut={activeLut}
             updatePhotoEdits={updatePhotoEdits}
             applyLocalRecipeToSelected={applyLocalRecipeToSelected}
             applyGlobalLookToScope={applyGlobalLookToScope}
+            exportStructuredZip={exportStructuredZip}
             showFeedback={showFeedback}
             closeEditor={closePostEditor}
           />
