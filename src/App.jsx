@@ -48,6 +48,7 @@ export default function App() {
   const [customLuts, setCustomLuts] = useState([]);
   const [customPresets, setCustomPresets] = useState([]);
   const [localClipboard, setLocalClipboard] = useState(null);
+  const [editorPreviewUrl, setEditorPreviewUrl] = useState(null);
 
   const canvasRef = useRef(null);
   const previewCanvasRef = useRef(null);
@@ -103,6 +104,12 @@ export default function App() {
   useEffect(() => {
     photosRef.current = photos;
   }, [photos]);
+
+  useEffect(() => {
+    if (!isPostEditorOpen || !canvasRef.current || !activePhoto) return;
+    const nextPreviewUrl = canvasRef.current.toDataURL("image/jpeg", 0.92);
+    setEditorPreviewUrl(nextPreviewUrl);
+  }, [isPostEditorOpen, activePhoto, globalLookRecipe, activeLut, selectedPointIndex, activePhoto?.localEditRecipe, activePhoto?.disableGlobalLook]);
 
   const showFeedback = (type, message) => {
     setFeedback({ type, message });
@@ -819,6 +826,7 @@ export default function App() {
             setCustomPresets={setCustomPresets}
             localClipboard={localClipboard}
             setLocalClipboard={setLocalClipboard}
+            activePreviewUrl={editorPreviewUrl}
             updatePhotoEdits={updatePhotoEdits}
             applyLocalRecipeToSelected={applyLocalRecipeToSelected}
             applyGlobalLookToScope={applyGlobalLookToScope}

@@ -59,6 +59,7 @@ export default function PostEditorModule({
   setCustomPresets,
   localClipboard,
   setLocalClipboard,
+  activePreviewUrl,
   updatePhotoEdits,
   applyLocalRecipeToSelected,
   applyGlobalLookToScope,
@@ -230,6 +231,16 @@ export default function PostEditorModule({
 
                 {tab === "local" ? (
                   <section className="space-y-4">
+                    <div className="overflow-hidden rounded-[24px] border border-white/10 bg-black/30">
+                      {activePreviewUrl ? (
+                        <img src={activePreviewUrl} alt={activePhoto?.fileName ?? "Preview"} className="max-h-[360px] w-full object-contain" />
+                      ) : (
+                        <div className="grid h-[280px] place-items-center text-sm text-[color:var(--muted-foreground)]">
+                          Preview carregando...
+                        </div>
+                      )}
+                    </div>
+
                     <div className="flex flex-wrap gap-2">
                       <Button variant="secondary" size="sm" onClick={() => setLocalClipboard({ ...activeLocalRecipe })}>
                         <Copy className="h-4 w-4" />
@@ -296,6 +307,16 @@ export default function PostEditorModule({
                   </section>
                 ) : (
                   <section className="space-y-4">
+                    <div className="overflow-hidden rounded-[24px] border border-white/10 bg-black/30">
+                      {activePreviewUrl ? (
+                        <img src={activePreviewUrl} alt={activePhoto?.fileName ?? "Preview"} className="max-h-[360px] w-full object-contain" />
+                      ) : (
+                        <div className="grid h-[280px] place-items-center text-sm text-[color:var(--muted-foreground)]">
+                          Preview carregando...
+                        </div>
+                      )}
+                    </div>
+
                     <div className="flex flex-wrap gap-2">
                       <Button variant="secondary" size="sm" onClick={() => applyGlobalLookToScope("selected")}>
                         <Layers3 className="h-4 w-4" />
