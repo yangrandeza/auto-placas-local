@@ -1,4 +1,4 @@
-import { Crosshair, Move, RotateCcw, Target } from "lucide-react";
+import { Crosshair, Move, RotateCcw, Sparkles, Target } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,9 @@ export function PointInspector({
   selectedPointIndex,
   setSelectedPointIndex,
   moveSelectedPoint,
+  hasLocalEdits,
+  hasGlobalLook,
+  openPostEditor,
 }) {
   const points = activePhoto?.points ?? [];
 
@@ -35,6 +38,22 @@ export function PointInspector({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <Button variant="secondary" className="w-full" onClick={openPostEditor} disabled={!activePhoto}>
+            <Sparkles className="h-4 w-4" />
+            Abrir editor pos
+          </Button>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] p-3">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted-foreground)]">Ajuste local</div>
+              <div className="mt-2 text-sm font-medium text-white">{hasLocalEdits ? "Ativo" : "Neutro"}</div>
+            </div>
+            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] p-3">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted-foreground)]">Look global</div>
+              <div className="mt-2 text-sm font-medium text-white">{hasGlobalLook ? "Ativo" : "Neutro"}</div>
+            </div>
+          </div>
+
           <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
             <div className="text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted-foreground)]">Zoom</div>
             <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

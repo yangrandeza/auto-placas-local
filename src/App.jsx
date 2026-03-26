@@ -1,6 +1,6 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
-import { AlertCircle, CheckCircle2, Info, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, LoaderCircle, Info, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { EditorCanvas } from "@/components/editor/editor-canvas";
@@ -14,6 +14,16 @@ import {
   findNearestPointIndex,
   revokePhotoUrls,
 } from "@/lib/utils";
+import {
+  applyRecipeToImageData,
+  DEFAULT_GLOBAL_LOOK_RECIPE,
+  DEFAULT_LOCAL_EDIT_RECIPE,
+  hasMeaningfulAdjustments,
+  makeGlobalLookRecipe,
+  makeLocalEditRecipe,
+} from "@/lib/post-processing";
+
+const PostEditorModule = lazy(() => import("@/components/post-editor/module.jsx"));
 
 export default function App() {
   const [photos, setPhotos] = useState([]);
@@ -32,6 +42,12 @@ export default function App() {
   const [isPanning, setIsPanning] = useState(false);
   const [feedback, setFeedback] = useState(null);
   const [expandedFolders, setExpandedFolders] = useState({});
+  const [isPostEditorOpen, setIsPostEditorOpen] = useState(false);
+  const [selectedPhotoIds, setSelectedPhotoIds] = useState([]);
+  const [globalLookRecipe, setGlobalLookRecipe] = useState(makeGlobalLookRecipe());
+  const [customLuts, setCustomLuts] = useState([]);
+  const [customPresets, setCustomPresets] = useState([]);
+  const [localClipboard, setLocalClipboard] = useState(null);
 
   const canvasRef = useRef(null);
   const previewCanvasRef = useRef(null);
@@ -49,6 +65,9 @@ export default function App() {
   const activePhotoIndex = photos.findIndex((photo) => photo.id === activeId);
   const completedCount = photos.filter((photo) => photo.points.length === 4).length;
   const unsavedCount = photos.filter((photo) => photo.points.length === 4 && !photo.saved).length;
+  const activeLut = customLuts.find((lut) => lut.id === globalLookRecipe.lutId) ?? null;
+  const activeHasLocalEdits = hasMeaningfulAdjustments(activePhoto?.localEditRecipe, DEFAULT_LOCAL_EDIT_RECIPE);
+  const activeHasGlobalLook = hasMeaningfulAdjustments(globalLookRecipe, DEFAULT_GLOBAL_LOOK_RECIPE) || Boolean(activeLut);
 
   const groupedPhotos = useMemo(
     () =>
@@ -84,6 +103,10 @@ export default function App() {
   useEffect(() => {
     photosRef.current = photos;
   }, [photos]);
+
+  const showFeedback = (type, message) => {
+    setFeedback({ type, message });
+  };
 
   useEffect(() => {
     if (!feedback) return undefined;
@@ -203,7 +226,9 @@ export default function App() {
     if (activePhoto.points.length === 4 && plateImgObj) {
       drawWarpedPlate(ctx, plateImgObj, activePhoto.points);
     }
-  }, [activeImageObj, activePhoto, plateImgObj]);
+
+    applyPostEditsToCanvas(canvas, activePhoto);
+  }, [activeImageObj, activePhoto, plateImgObj, globalLookRecipe, activeLut]);
 
   useEffect(() => {
     if (!previewCanvasRef.current || !activeImageObj || !activePhoto) return;
@@ -358,10 +383,17 @@ export default function App() {
       return;
     }
 
-    const newPhotos = imageFiles.map((file) => createPhotoRecord(file, folderMode));
+    const newPhotos = imageFiles.map((file) => ({
+      ...createPhotoRecord(file, folderMode),
+      localEditRecipe: makeLocalEditRecipe(),
+      disableGlobalLook: false,
+    }));
     setPhotos((current) => {
       const updated = [...current, ...newPhotos];
-      if (current.length === 0 && updated.length > 0) setActiveId(updated[0].id);
+      if (current.length === 0 && updated.length > 0) {
+        setActiveId(updated[0].id);
+        setSelectedPhotoIds([updated[0].id]);
+      }
       return updated;
     });
     setFeedback({
@@ -395,6 +427,7 @@ export default function App() {
   };
 
   const removePhoto = (id) => {
+    setSelectedPhotoIds((current) => current.filter((photoId) => photoId !== id));
     setPhotos((current) => {
       const target = current.find((photo) => photo.id === id);
       if (target) URL.revokeObjectURL(target.url);
@@ -526,6 +559,88 @@ export default function App() {
     }
   };
 
+  const updatePhotoEdits = (photoId, patch) => {
+    setPhotos((current) =>
+      current.map((photo) =>
+        photo.id === photoId
+          ? {
+              ...photo,
+              ...patch,
+              localEditRecipe: patch.localEditRecipe
+                ? makeLocalEditRecipe(patch.localEditRecipe)
+                : photo.localEditRecipe ?? makeLocalEditRecipe(),
+              saved: false,
+            }
+          : photo,
+      ),
+    );
+  };
+
+  const applyLocalRecipeToSelected = (recipe) => {
+    if (selectedPhotoIds.length === 0) return;
+    setPhotos((current) =>
+      current.map((photo) =>
+        selectedPhotoIds.includes(photo.id)
+          ? {
+              ...photo,
+              localEditRecipe: makeLocalEditRecipe(recipe),
+              saved: false,
+            }
+          : photo,
+      ),
+    );
+    showFeedback("success", `Ajuste local aplicado em ${selectedPhotoIds.length} foto(s).`);
+  };
+
+  const applyGlobalLookToScope = (scope) => {
+    if (scope === "all") {
+      setPhotos((current) =>
+        current.map((photo) => ({
+          ...photo,
+          disableGlobalLook: false,
+          saved: false,
+        })),
+      );
+      showFeedback("success", "Look global habilitado para todas as fotos.");
+      return;
+    }
+
+    if (selectedPhotoIds.length === 0) {
+      showFeedback("info", "Selecione fotos no editor para aplicar o look em lote.");
+      return;
+    }
+
+    setPhotos((current) =>
+      current.map((photo) =>
+        selectedPhotoIds.includes(photo.id)
+          ? { ...photo, disableGlobalLook: false, saved: false }
+          : photo,
+      ),
+    );
+    showFeedback("success", `Look global habilitado em ${selectedPhotoIds.length} foto(s).`);
+  };
+
+  const applyPostEditsToCanvas = (canvas, photo) => {
+    const activeLocalRecipe = photo.localEditRecipe ?? DEFAULT_LOCAL_EDIT_RECIPE;
+    const shouldApplyGlobal = !photo.disableGlobalLook;
+    const effectiveGlobalRecipe = shouldApplyGlobal ? globalLookRecipe : DEFAULT_GLOBAL_LOOK_RECIPE;
+    const effectiveLut = shouldApplyGlobal ? activeLut : null;
+
+    const hasLocal = hasMeaningfulAdjustments(activeLocalRecipe, DEFAULT_LOCAL_EDIT_RECIPE);
+    const hasGlobal = hasMeaningfulAdjustments(effectiveGlobalRecipe, DEFAULT_GLOBAL_LOOK_RECIPE) || Boolean(effectiveLut);
+    if (!hasLocal && !hasGlobal) return;
+
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const processed = applyRecipeToImageData(
+      imageData,
+      activeLocalRecipe,
+      effectiveGlobalRecipe,
+      effectiveLut,
+    );
+    ctx.putImageData(processed, 0, 0);
+  };
+
   const exportStructuredZip = async () => {
     if (!plateImgObj) {
       setFeedback({ type: "error", message: "Envie a imagem da placa antes de exportar." });
@@ -556,6 +671,7 @@ export default function App() {
         const ctx = canvas.getContext("2d");
         ctx.drawImage(sourceImage, 0, 0);
         drawWarpedPlate(ctx, plateImgObj, photo.points);
+        applyPostEditsToCanvas(canvas, photo);
 
         const blob = await new Promise((resolve, reject) => {
           canvas.toBlob(
@@ -591,6 +707,21 @@ export default function App() {
     } finally {
       setIsExporting(false);
     }
+  };
+
+  const openPostEditor = () => {
+    if (!activePhoto) {
+      showFeedback("info", "Abra uma foto para usar o editor pos.");
+      return;
+    }
+    startTransition(() => {
+      setIsPostEditorOpen(true);
+      setSelectedPhotoIds((current) => (current.length > 0 ? current : [activePhoto.id]));
+    });
+  };
+
+  const closePostEditor = () => {
+    setIsPostEditorOpen(false);
   };
 
   return (
@@ -656,8 +787,46 @@ export default function App() {
           selectedPointIndex={selectedPointIndex}
           setSelectedPointIndex={setSelectedPointIndex}
           moveSelectedPoint={moveSelectedPoint}
+          hasLocalEdits={activeHasLocalEdits}
+          hasGlobalLook={activeHasGlobalLook}
+          openPostEditor={openPostEditor}
         />
       </div>
+
+      <Suspense
+        fallback={
+          <div className="fixed inset-0 z-[60] grid place-items-center bg-[rgba(2,6,23,0.6)]">
+            <div className="flex items-center gap-3 rounded-full border border-white/10 bg-[rgba(6,11,24,0.92)] px-5 py-3 text-white shadow-xl">
+              <LoaderCircle className="h-5 w-5 animate-spin" />
+              Carregando editor pos...
+            </div>
+          </div>
+        }
+      >
+        {isPostEditorOpen ? (
+          <PostEditorModule
+            photos={photos}
+            activePhoto={activePhoto}
+            activeId={activeId}
+            setActiveId={setActiveId}
+            selectedPhotoIds={selectedPhotoIds}
+            setSelectedPhotoIds={setSelectedPhotoIds}
+            globalLookRecipe={globalLookRecipe}
+            setGlobalLookRecipe={setGlobalLookRecipe}
+            customLuts={customLuts}
+            setCustomLuts={setCustomLuts}
+            customPresets={customPresets}
+            setCustomPresets={setCustomPresets}
+            localClipboard={localClipboard}
+            setLocalClipboard={setLocalClipboard}
+            updatePhotoEdits={updatePhotoEdits}
+            applyLocalRecipeToSelected={applyLocalRecipeToSelected}
+            applyGlobalLookToScope={applyGlobalLookToScope}
+            showFeedback={showFeedback}
+            closeEditor={closePostEditor}
+          />
+        ) : null}
+      </Suspense>
 
       <AnimatePresence>
         {feedback ? (
