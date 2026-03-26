@@ -1,0 +1,28 @@
+{
+  "name": "placas",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "fast-xml-parser": "^5.5.9",
+    "framer-motion": "^12.38.0",
+    "jszip": "^3.10.1",
+    "lucide-react": "^1.7.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.2.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.4.1",
+    "vite": "^5.4.19"
+  }
+}
