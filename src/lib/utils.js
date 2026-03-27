@@ -58,13 +58,58 @@ export function createPhotoRecord(file, folderMode) {
     fileName: file.name,
     relativePath,
     url: URL.createObjectURL(file),
+    thumbUrl: null,
     points: [],
     saved: false,
   };
 }
 
 export function revokePhotoUrls(photos) {
-  photos.forEach((photo) => URL.revokeObjectURL(photo.url));
+  photos.forEach((photo) => {
+    URL.revokeObjectURL(photo.url);
+    if (photo.thumbUrl) {
+      URL.revokeObjectURL(photo.thumbUrl);
+    }
+  });
+}
+
+export async function createThumbnailUrl(file, maxSize = 220) {
+  let sourceImage = null;
+  let temporaryUrl = null;
+
+  if (typeof createImageBitmap === "function") {
+    sourceImage = await createImageBitmap(file);
+  } else {
+    temporaryUrl = URL.createObjectURL(file);
+    sourceImage = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = temporaryUrl;
+    });
+  }
+
+  const scale = Math.min(maxSize / sourceImage.width, maxSize / sourceImage.height, 1);
+  const width = Math.max(1, Math.round(sourceImage.width * scale));
+  const height = Math.max(1, Math.round(sourceImage.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const ctx = canvas.getContext("2d", { alpha: false });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(sourceImage, 0, 0, width, height);
+  sourceImage.close?.();
+  if (temporaryUrl) {
+    URL.revokeObjectURL(temporaryUrl);
+  }
+
+  const blob = await new Promise((resolve) => {
+    canvas.toBlob(resolve, "image/jpeg", 0.78);
+  });
+
+  return blob ? URL.createObjectURL(blob) : null;
 }
 
 export function drawWarpedPlate(ctx, plate, points) {

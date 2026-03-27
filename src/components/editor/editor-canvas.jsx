@@ -12,7 +12,8 @@ export function EditorCanvas({
   navigatePhoto,
   mousePos,
   activeDim,
-  zoom,
+  resolvedZoom,
+  viewportSize,
   canvasRef,
   previewCanvasRef,
   canvasScrollRef,
@@ -48,8 +49,15 @@ export function EditorCanvas({
     );
   }
 
+  const canvasWidth = Math.max(activeDim.w * resolvedZoom, 1);
+  const canvasHeight = Math.max(activeDim.h * resolvedZoom, 1);
+  const stageWidth = Math.max(canvasWidth, viewportSize.width || 0);
+  const stageHeight = Math.max(canvasHeight, viewportSize.height || 0);
+  const offsetX = canvasWidth < stageWidth ? (stageWidth - canvasWidth) / 2 : 0;
+  const offsetY = canvasHeight < stageHeight ? (stageHeight - canvasHeight) / 2 : 0;
+
   return (
-    <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+    <main className="relative z-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.12),transparent_24%),radial-gradient(circle_at_80%_100%,rgba(251,191,36,0.08),transparent_22%)]" />
 
       <div className="relative z-10 flex flex-col gap-3 border-b border-white/10 px-4 py-4 sm:px-6 sm:py-5 lg:flex-row lg:items-center lg:justify-between">
@@ -76,7 +84,7 @@ export function EditorCanvas({
         </div>
       </div>
 
-        <div ref={canvasScrollRef} className="scrollbar-none relative flex-1 overflow-auto p-3 sm:p-6">
+      <div className="relative flex-1 overflow-hidden">
         <AnimatePresence>
           {showLoupe ? (
             <motion.div
@@ -84,7 +92,7 @@ export function EditorCanvas({
               initial={{ opacity: 0, y: -8, scale: 0.92 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -8, scale: 0.96 }}
-              className="absolute right-3 top-3 z-20 hidden overflow-hidden rounded-[28px] border border-white/10 bg-[rgba(7,12,25,0.88)] shadow-[0_26px_80px_rgba(0,0,0,0.34)] backdrop-blur-xl lg:block"
+              className="pointer-events-none absolute right-3 top-3 z-20 hidden overflow-hidden rounded-[28px] border border-white/10 bg-[rgba(7,12,25,0.88)] shadow-[0_26px_80px_rgba(0,0,0,0.34)] backdrop-blur-xl lg:block"
             >
               <div className="border-b border-white/10 px-4 py-3 text-[11px] uppercase tracking-[0.22em] text-[color:var(--muted-foreground)]">
                 Lupa de precisao
@@ -101,7 +109,7 @@ export function EditorCanvas({
               initial={{ opacity: 0, y: -8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
-              className="absolute left-1/2 top-3 z-10 w-[calc(100%-1.5rem)] max-w-max -translate-x-1/2 sm:top-6 sm:w-auto"
+              className="pointer-events-none absolute left-1/2 top-3 z-10 w-[calc(100%-1.5rem)] max-w-max -translate-x-1/2 sm:top-6 sm:w-auto"
             >
               <Card className="rounded-[24px] px-4 py-3 sm:rounded-full sm:px-5">
                 <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-white sm:text-sm">
@@ -119,38 +127,41 @@ export function EditorCanvas({
           ) : null}
         </AnimatePresence>
 
-        <div className="flex min-h-full items-center justify-center">
-          <motion.div
-            layout
-            className="relative shrink-0 overflow-hidden rounded-[20px] border border-white/10 bg-black/30 shadow-[0_40px_140px_rgba(0,0,0,0.4)] sm:rounded-[28px]"
-            style={
-              zoom === 0
-                ? {
-                    maxWidth: "100%",
-                    maxHeight: "100%",
-                    aspectRatio: activeDim.w ? `${activeDim.w}/${activeDim.h}` : "auto",
-                  }
-                : { width: `${activeDim.w * zoom}px`, height: `${activeDim.h * zoom}px` }
-            }
+        <div ref={canvasScrollRef} className="scrollbar-none relative h-full overflow-auto p-3 sm:p-6">
+          <div
+            className="relative"
+            style={{
+              width: `${stageWidth}px`,
+              height: `${stageHeight}px`,
+            }}
           >
-            <canvas ref={canvasRef} className="pointer-events-none block h-full w-full" />
-            <canvas
-              ref={previewCanvasRef}
-              className={`absolute inset-0 block h-full w-full ${
-                isSpaceDown || isPanning
-                  ? "cursor-grab"
-                  : selectedPointIndex >= 0
-                    ? "cursor-grab active:cursor-grabbing"
-                    : "cursor-crosshair"
-              }`}
-              onClick={handleCanvasClick}
-              onPointerDown={handleCanvasPointerDown}
-              onPointerMove={handleCanvasPointerMove}
-              onPointerUp={handleCanvasPointerUp}
-              onPointerCancel={handleCanvasPointerUp}
-              onPointerLeave={() => setMousePos(null)}
-            />
-          </motion.div>
+            <div
+              className="absolute overflow-hidden rounded-[20px] border border-white/10 bg-black/30 shadow-[0_40px_140px_rgba(0,0,0,0.4)] sm:rounded-[28px]"
+              style={{
+                left: `${offsetX}px`,
+                top: `${offsetY}px`,
+                width: `${canvasWidth}px`,
+                height: `${canvasHeight}px`,
+              }}
+            >
+              <canvas ref={canvasRef} className="pointer-events-none block h-full w-full" />
+              <canvas
+                ref={previewCanvasRef}
+                className={`absolute inset-0 block h-full w-full ${
+                  isSpaceDown || isPanning
+                    ? "cursor-grab"
+                    : selectedPointIndex >= 0
+                      ? "cursor-grab active:cursor-grabbing"
+                      : "cursor-crosshair"
+                }`}
+                onClick={handleCanvasClick}
+                onPointerDown={handleCanvasPointerDown}
+                onPointerMove={handleCanvasPointerMove}
+                onPointerUp={handleCanvasPointerUp}
+                onPointerCancel={handleCanvasPointerUp}
+              />
+            </div>
+          </div>
         </div>
       </div>
     </main>

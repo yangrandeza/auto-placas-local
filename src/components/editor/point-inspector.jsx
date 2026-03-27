@@ -1,4 +1,4 @@
-import { Crosshair, Move, RotateCcw, Sparkles, Target } from "lucide-react";
+import { Crosshair, Move, RotateCcw, Target } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,21 +10,18 @@ export function PointInspector({
   activePhoto,
   activePhotoIndex,
   totalPhotos,
-  zoom,
-  setZoom,
+  zoomLabel,
+  setZoomToFit,
   applyZoomDelta,
   clearPoints,
   selectedPointIndex,
   setSelectedPointIndex,
   moveSelectedPoint,
-  hasLocalEdits,
-  hasGlobalLook,
-  openPostEditor,
 }) {
   const points = activePhoto?.points ?? [];
 
   return (
-    <div className="scrollbar-none flex h-full min-h-0 w-full shrink-0 flex-col gap-4 overflow-y-auto border-t border-white/10 bg-[rgba(7,12,25,0.72)] p-3 backdrop-blur-2xl lg:max-h-none lg:max-w-[360px] lg:border-l lg:border-t-0 lg:p-4">
+    <div className="scrollbar-none relative z-20 flex h-full min-h-0 w-full shrink-0 flex-col gap-4 overflow-y-auto border-t border-white/10 bg-[rgba(7,12,25,0.72)] p-3 backdrop-blur-2xl lg:max-h-none lg:max-w-[360px] lg:border-l lg:border-t-0 lg:p-4">
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center justify-between">
@@ -38,30 +35,22 @@ export function PointInspector({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <Button variant="secondary" className="w-full" onClick={openPostEditor} disabled={!activePhoto}>
-            <Sparkles className="h-4 w-4" />
-            Abrir editor pos
-          </Button>
-
-          <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] p-3">
-              <div className="text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted-foreground)]">Ajuste local</div>
-              <div className="mt-2 text-sm font-medium text-white">{hasLocalEdits ? "Ativo" : "Neutro"}</div>
-            </div>
-            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] p-3">
-              <div className="text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted-foreground)]">Look global</div>
-              <div className="mt-2 text-sm font-medium text-white">{hasGlobalLook ? "Ativo" : "Neutro"}</div>
-            </div>
-          </div>
-
           <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
             <div className="text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted-foreground)]">Zoom</div>
             <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="font-display text-2xl text-white sm:text-3xl">{zoom === 0 ? "FIT" : `${Math.round(zoom * 100)}%`}</div>
+              <div className="font-display text-2xl text-white sm:text-3xl">
+                {zoomLabel}
+              </div>
               <div className="flex gap-2">
-                <Button variant="secondary" size="sm" onClick={() => setZoom(0)}>Auto</Button>
-                <Button variant="secondary" size="sm" onClick={() => applyZoomDelta(-1, 1)}>-</Button>
-                <Button variant="secondary" size="sm" onClick={() => applyZoomDelta(1, 1)}>+</Button>
+                <Button variant="secondary" size="sm" onClick={setZoomToFit}>
+                  Auto
+                </Button>
+                <Button variant="secondary" size="sm" onClick={() => applyZoomDelta(-1, 1, null, "button")}>
+                  -
+                </Button>
+                <Button variant="secondary" size="sm" onClick={() => applyZoomDelta(1, 1, null, "button")}>
+                  +
+                </Button>
               </div>
             </div>
           </div>
@@ -84,6 +73,11 @@ export function PointInspector({
               </div>
             </div>
           </div>
+
+          <Button variant="outline" className="w-full" onClick={clearPoints}>
+            <RotateCcw className="h-4 w-4" />
+            Limpar pontos da foto ativa
+          </Button>
         </CardContent>
       </Card>
 
@@ -130,18 +124,21 @@ export function PointInspector({
             </div>
             <div className="grid grid-cols-3 gap-2">
               <div />
-              <Button variant="secondary" onClick={() => moveSelectedPoint(0, -1)}>↑</Button>
+              <Button variant="secondary" onClick={() => moveSelectedPoint(0, -1)}>
+                Cima
+              </Button>
               <div />
-              <Button variant="secondary" onClick={() => moveSelectedPoint(-1, 0)}>←</Button>
-              <Button variant="secondary" onClick={() => moveSelectedPoint(0, 1)}>↓</Button>
-              <Button variant="secondary" onClick={() => moveSelectedPoint(1, 0)}>→</Button>
+              <Button variant="secondary" onClick={() => moveSelectedPoint(-1, 0)}>
+                Esq
+              </Button>
+              <Button variant="secondary" onClick={() => moveSelectedPoint(0, 1)}>
+                Baixo
+              </Button>
+              <Button variant="secondary" onClick={() => moveSelectedPoint(1, 0)}>
+                Dir
+              </Button>
             </div>
           </div>
-
-          <Button variant="outline" className="w-full" onClick={clearPoints}>
-            <RotateCcw className="h-4 w-4" />
-            Limpar pontos da foto ativa
-          </Button>
         </CardContent>
       </Card>
     </div>

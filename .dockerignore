@@ -1,0 +1,10 @@
+.git
+.gitignore
+.codex
+dist
+node_modules
+tmp-test-assets
+vite.stdout.log
+vite.stderr.log
+Dockerfile*
+README.md

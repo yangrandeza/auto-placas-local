@@ -1,6 +1,6 @@
-import { Suspense, lazy, startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
-import { AlertCircle, CheckCircle2, LoaderCircle, Info, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, Info, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { EditorCanvas } from "@/components/editor/editor-canvas";
@@ -10,20 +10,11 @@ import {
   IMAGE_REGEX,
   clamp,
   createPhotoRecord,
+  createThumbnailUrl,
+  drawWarpedPlate,
   findNearestPointIndex,
   revokePhotoUrls,
 } from "@/lib/utils";
-import {
-  applyPostEditsToCanvas,
-  DEFAULT_GLOBAL_LOOK_RECIPE,
-  DEFAULT_LOCAL_EDIT_RECIPE,
-  hasMeaningfulAdjustments,
-  makeGlobalLookRecipe,
-  makeLocalEditRecipe,
-  renderPhotoToCanvas,
-} from "@/lib/post-processing";
-
-const PostEditorModule = lazy(() => import("@/components/post-editor/module.jsx"));
 
 export default function App() {
   const [photos, setPhotos] = useState([]);
@@ -32,6 +23,7 @@ export default function App() {
   const [plateImgObj, setPlateImgObj] = useState(null);
   const [activeImageObj, setActiveImageObj] = useState(null);
   const [activeDim, setActiveDim] = useState({ w: 0, h: 0 });
+  const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const [zoom, setZoom] = useState(0);
   const [mousePos, setMousePos] = useState(null);
   const [isShiftDown, setIsShiftDown] = useState(false);
@@ -42,17 +34,10 @@ export default function App() {
   const [isPanning, setIsPanning] = useState(false);
   const [feedback, setFeedback] = useState(null);
   const [expandedFolders, setExpandedFolders] = useState({});
-  const [isPostEditorOpen, setIsPostEditorOpen] = useState(false);
-  const [selectedPhotoIds, setSelectedPhotoIds] = useState([]);
-  const [globalLookRecipe, setGlobalLookRecipe] = useState(makeGlobalLookRecipe());
-  const [customLuts, setCustomLuts] = useState([]);
-  const [customPresets, setCustomPresets] = useState([]);
-  const [localClipboard, setLocalClipboard] = useState(null);
   const [pointHistory, setPointHistory] = useState({});
 
   const canvasRef = useRef(null);
   const previewCanvasRef = useRef(null);
-  const containerRef = useRef(null);
   const lupaCanvasRef = useRef(null);
   const photosRef = useRef([]);
   const plateInputRef = useRef(null);
@@ -61,16 +46,16 @@ export default function App() {
   const canvasScrollRef = useRef(null);
   const panStateRef = useRef({ pointerX: 0, pointerY: 0, scrollLeft: 0, scrollTop: 0 });
   const dragHistoryCommittedRef = useRef(false);
+  const zoomRef = useRef(0);
+  const fitZoomRef = useRef(1);
+  const pendingZoomAnchorRef = useRef(null);
+  const thumbnailQueueRef = useRef(new Set());
 
   const activePhoto = photos.find((photo) => photo.id === activeId) ?? null;
   const deferredPhotos = useDeferredValue(photos);
   const activePhotoIndex = photos.findIndex((photo) => photo.id === activeId);
   const completedCount = photos.filter((photo) => photo.points.length === 4).length;
   const unsavedCount = photos.filter((photo) => photo.points.length === 4 && !photo.saved).length;
-  const activeLut = customLuts.find((lut) => lut.id === globalLookRecipe.lutId) ?? null;
-  const activeHasLocalEdits = hasMeaningfulAdjustments(activePhoto?.localEditRecipe, DEFAULT_LOCAL_EDIT_RECIPE);
-  const activeHasGlobalLook = hasMeaningfulAdjustments(globalLookRecipe, DEFAULT_GLOBAL_LOOK_RECIPE) || Boolean(activeLut);
-
   const groupedPhotos = useMemo(
     () =>
       deferredPhotos.reduce((acc, photo) => {
@@ -86,34 +71,176 @@ export default function App() {
     setExpandedFolders((current) => (current[activePhoto.path] ? current : { ...current, [activePhoto.path]: true }));
   }, [activePhoto?.path]);
 
-  const getFitZoom = () => {
+  const getViewportMetrics = useCallback(() => {
     const container = canvasScrollRef.current;
-    if (!container || activeDim.w <= 0 || activeDim.h <= 0) return 1;
+    if (!container) {
+      return {
+        width: 1,
+        height: 1,
+      };
+    }
 
     const computedStyle = window.getComputedStyle(container);
     const paddingX = Number.parseFloat(computedStyle.paddingLeft || "0") + Number.parseFloat(computedStyle.paddingRight || "0");
     const paddingY = Number.parseFloat(computedStyle.paddingTop || "0") + Number.parseFloat(computedStyle.paddingBottom || "0");
 
-    const availableWidth = Math.max(container.clientWidth - paddingX, 1);
-    const availableHeight = Math.max(container.clientHeight - paddingY, 1);
+    return {
+      width: Math.max(container.clientWidth - paddingX, 1),
+      height: Math.max(container.clientHeight - paddingY, 1),
+    };
+  }, []);
 
-    const fitScale = Math.min(availableWidth / activeDim.w, availableHeight / activeDim.h);
+  const liveViewportSize = getViewportMetrics();
+  const effectiveViewportSize =
+    viewportSize.width > 1 && viewportSize.height > 1 ? viewportSize : liveViewportSize;
+
+  const fitZoom = useMemo(() => {
+    if (activeDim.w <= 0 || activeDim.h <= 0 || effectiveViewportSize.width <= 1 || effectiveViewportSize.height <= 1) return 1;
+    const fitScale = Math.min(effectiveViewportSize.width / activeDim.w, effectiveViewportSize.height / activeDim.h);
     return Math.max(fitScale, 0.05);
-  };
+  }, [activeDim.h, activeDim.w, effectiveViewportSize.height, effectiveViewportSize.width]);
 
-  const resolveZoomValue = (value) => (value === 0 ? getFitZoom() : value);
+  const resolvedZoom = zoom === 0 ? fitZoom : zoom;
+  const zoomLabel = zoom === 0 ? "FIT" : `${Math.round(resolvedZoom * 100)}%`;
 
-  const applyZoomDelta = (direction, intensity = 1) => {
+  const queueZoomAnchor = useCallback((anchorClientPoint) => {
+    const container = canvasScrollRef.current;
+    const previewCanvas = previewCanvasRef.current;
+    const wrapper = previewCanvas?.parentElement;
+    if (!container || !wrapper) {
+      pendingZoomAnchorRef.current = null;
+      return;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const wrapperRect = wrapper.getBoundingClientRect();
+    const viewportOffsetX = anchorClientPoint
+      ? clamp(anchorClientPoint.x - containerRect.left, 0, containerRect.width)
+      : container.clientWidth / 2;
+    const viewportOffsetY = anchorClientPoint
+      ? clamp(anchorClientPoint.y - containerRect.top, 0, containerRect.height)
+      : container.clientHeight / 2;
+    const anchorRatioX = wrapperRect.width > 0
+      ? clamp(
+          (anchorClientPoint ? anchorClientPoint.x - wrapperRect.left : wrapperRect.width / 2) / wrapperRect.width,
+          0,
+          1,
+        )
+      : 0.5;
+    const anchorRatioY = wrapperRect.height > 0
+      ? clamp(
+          (anchorClientPoint ? anchorClientPoint.y - wrapperRect.top : wrapperRect.height / 2) / wrapperRect.height,
+          0,
+          1,
+        )
+      : 0.5;
+
+    pendingZoomAnchorRef.current = {
+      anchorRatioX,
+      anchorRatioY,
+      viewportOffsetX,
+      viewportOffsetY,
+    };
+  }, []);
+
+  const applyZoomDelta = useCallback((direction, intensity = 1, anchorClientPoint = null, source = "wheel") => {
+    queueZoomAnchor(anchorClientPoint);
     setZoom((current) => {
-      const baseZoom = resolveZoomValue(current);
-      const factor = Math.pow(1.035, intensity * direction);
+      const isFitMode = current === 0;
+      if (isFitMode && direction < 0) return 0;
+
+      const baseZoom = isFitMode ? fitZoomRef.current : current;
+      const step = source === "button" ? 1.14 : 1.08;
+      const factor = Math.pow(step, intensity * direction);
       const nextZoom = clamp(baseZoom * factor, 0.08, 8);
-      return Math.abs(nextZoom - getFitZoom()) < 0.015 ? 0 : nextZoom;
+      if (Math.abs(nextZoom - fitZoomRef.current) < 0.01) return 0;
+      return nextZoom;
     });
-  };
+  }, [queueZoomAnchor]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => {
+    fitZoomRef.current = fitZoom;
+  }, [fitZoom]);
+
+  useLayoutEffect(() => {
+    const container = canvasScrollRef.current;
+    if (!container) return undefined;
+
+    const updateViewport = () => {
+      setViewportSize(getViewportMetrics());
+    };
+
+    updateViewport();
+    const initialFrameId = window.requestAnimationFrame(updateViewport);
+
+    const resizeObserver = new ResizeObserver(updateViewport);
+    resizeObserver.observe(container);
+    return () => {
+      window.cancelAnimationFrame(initialFrameId);
+      resizeObserver.disconnect();
+    };
+  }, [getViewportMetrics, activeId]);
+
+  useLayoutEffect(() => {
+    const frameId = window.requestAnimationFrame(() => {
+      setViewportSize(getViewportMetrics());
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [activeDim.h, activeDim.w, activeId, getViewportMetrics]);
 
   useEffect(() => {
     photosRef.current = photos;
+  }, [photos]);
+
+  useEffect(() => {
+    const pendingPhotos = photos
+      .filter((photo) => !photo.thumbUrl && !thumbnailQueueRef.current.has(photo.id))
+      .slice(0, 2);
+    if (pendingPhotos.length === 0) return undefined;
+
+    let cancelled = false;
+    const scheduleThumbnailWork = window.requestIdleCallback
+      ? window.requestIdleCallback.bind(window)
+      : (callback) => window.setTimeout(callback, 80);
+    const cancelThumbnailWork = window.cancelIdleCallback
+      ? window.cancelIdleCallback.bind(window)
+      : window.clearTimeout.bind(window);
+
+    const jobId = scheduleThumbnailWork(async () => {
+      for (const photo of pendingPhotos) {
+        thumbnailQueueRef.current.add(photo.id);
+        let thumbUrl = null;
+
+        try {
+          thumbUrl = await createThumbnailUrl(photo.file);
+          if (cancelled || !thumbUrl) continue;
+
+          setPhotos((current) =>
+            current.map((currentPhoto) =>
+              currentPhoto.id === photo.id
+                ? { ...currentPhoto, thumbUrl }
+                : currentPhoto,
+            ),
+          );
+        } catch (error) {
+          console.error("Falha ao gerar miniatura", error);
+          if (thumbUrl) {
+            URL.revokeObjectURL(thumbUrl);
+          }
+        } finally {
+          thumbnailQueueRef.current.delete(photo.id);
+        }
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      cancelThumbnailWork(jobId);
+    };
   }, [photos]);
 
   const showFeedback = (type, message) => {
@@ -130,7 +257,17 @@ export default function App() {
     const onKeyDown = (event) => {
       if (event.key === "Shift") setIsShiftDown(true);
       if (event.key === "Escape") {
-        setSelectedPointIndex(-1);
+        event.preventDefault();
+        if (selectedPointIndex >= 0 && activePhoto?.points[selectedPointIndex]) {
+          const nextPoints = activePhoto.points.filter((_, index) => index !== selectedPointIndex);
+          pushPointHistorySnapshot(activePhoto.id, nextPoints);
+          applyPointsToPhoto(activePhoto.id, nextPoints);
+          setSelectedPointIndex(-1);
+        } else if (activePhoto?.points.length) {
+          undoPoints();
+        } else {
+          setSelectedPointIndex(-1);
+        }
         setDraggingPointIndex(-1);
         setIsPanning(false);
       }
@@ -215,7 +352,7 @@ export default function App() {
       setMousePos({ x: img.width / 2, y: img.height / 2 });
     };
     img.src = activePhoto.url;
-  }, [activePhoto]);
+  }, [activePhoto?.id, activePhoto?.url]);
 
   useEffect(() => {
     if (selectedPointIndex >= (activePhoto?.points.length ?? 0)) {
@@ -227,7 +364,30 @@ export default function App() {
     if (zoom !== 0 || !canvasScrollRef.current) return;
     canvasScrollRef.current.scrollLeft = 0;
     canvasScrollRef.current.scrollTop = 0;
-  }, [zoom, activeId]);
+  }, [zoom, activeId, fitZoom]);
+
+  useLayoutEffect(() => {
+    const pendingAnchor = pendingZoomAnchorRef.current;
+    const container = canvasScrollRef.current;
+    const previewCanvas = previewCanvasRef.current;
+    const wrapper = previewCanvas?.parentElement;
+
+    if (!pendingAnchor || !container || !wrapper) return undefined;
+
+    const frameId = window.requestAnimationFrame(() => {
+      container.scrollLeft = Math.max(
+        wrapper.offsetLeft + wrapper.offsetWidth * pendingAnchor.anchorRatioX - pendingAnchor.viewportOffsetX,
+        0,
+      );
+      container.scrollTop = Math.max(
+        wrapper.offsetTop + wrapper.offsetHeight * pendingAnchor.anchorRatioY - pendingAnchor.viewportOffsetY,
+        0,
+      );
+      pendingZoomAnchorRef.current = null;
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [resolvedZoom, effectiveViewportSize.height, effectiveViewportSize.width, activeId]);
 
   useEffect(() => {
     if (!activeImageObj || !canvasRef.current || !previewCanvasRef.current || !activePhoto) return;
@@ -241,15 +401,14 @@ export default function App() {
       preview.height = activeImageObj.height;
     }
 
-    renderPhotoToCanvas({
-      canvas,
-      sourceImage: activeImageObj,
-      plateImage: plateImgObj,
-      photo: activePhoto,
-      globalRecipe: globalLookRecipe,
-      lut: activeLut,
-    });
-  }, [activeImageObj, activePhoto, plateImgObj, globalLookRecipe, activeLut]);
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(activeImageObj, 0, 0);
+
+    if (activePhoto.points.length === 4 && plateImgObj) {
+      drawWarpedPlate(ctx, plateImgObj, activePhoto.points);
+    }
+  }, [activeImageObj, activePhoto, plateImgObj]);
 
   useEffect(() => {
     if (!previewCanvasRef.current || !activeImageObj || !activePhoto) return;
@@ -300,26 +459,24 @@ export default function App() {
   }, [activeImageObj, activePhoto, mousePos, selectedPointIndex]);
 
   useEffect(() => {
-    const previewCanvas = previewCanvasRef.current;
-    const canvasScroll = canvasScrollRef.current;
-    if (!previewCanvas && !canvasScroll) return undefined;
-
     const nativeWheelHandler = (event) => {
-      if (!activePhoto || !event.ctrlKey) return;
-      event.preventDefault();
+      if (!activePhoto || !event.ctrlKey || !canvasScrollRef.current) return;
+      const eventTarget = event.target;
+      if (!(eventTarget instanceof Node) || !canvasScrollRef.current.contains(eventTarget)) return;
+      if (event.cancelable) {
+        event.preventDefault();
+      }
       event.stopPropagation();
       const direction = event.deltaY < 0 ? 1 : -1;
-      const intensity = clamp(Math.abs(event.deltaY) / 320, 0.14, 0.35);
-      applyZoomDelta(direction, intensity);
+      const intensity = clamp(Math.abs(event.deltaY) / 180, 0.45, 1.35);
+      applyZoomDelta(direction, intensity, { x: event.clientX, y: event.clientY }, "wheel");
     };
 
-    previewCanvas?.addEventListener("wheel", nativeWheelHandler, { passive: false });
-    canvasScroll?.addEventListener("wheel", nativeWheelHandler, { passive: false });
+    window.addEventListener("wheel", nativeWheelHandler, { passive: false, capture: true });
     return () => {
-      previewCanvas?.removeEventListener("wheel", nativeWheelHandler);
-      canvasScroll?.removeEventListener("wheel", nativeWheelHandler);
+      window.removeEventListener("wheel", nativeWheelHandler, { capture: true });
     };
-  }, [activePhoto, activeDim.w, activeDim.h, applyZoomDelta]);
+  }, [activePhoto, applyZoomDelta]);
 
   useEffect(() => {
     if (!mousePos || !lupaCanvasRef.current || !canvasRef.current || !previewCanvasRef.current) return;
@@ -502,18 +659,15 @@ export default function App() {
       return;
     }
 
-    const newPhotos = imageFiles.map((file) => ({
-      ...createPhotoRecord(file, folderMode),
-      localEditRecipe: makeLocalEditRecipe(),
-      disableGlobalLook: false,
-    }));
-    setPhotos((current) => {
-      const updated = [...current, ...newPhotos];
-      if (current.length === 0 && updated.length > 0) {
-        setActiveId(updated[0].id);
-        setSelectedPhotoIds([updated[0].id]);
-      }
-      return updated;
+    const newPhotos = imageFiles.map((file) => createPhotoRecord(file, folderMode));
+    startTransition(() => {
+      setPhotos((current) => {
+        const updated = [...current, ...newPhotos];
+        if (current.length === 0 && updated.length > 0) {
+          setActiveId(updated[0].id);
+        }
+        return updated;
+      });
     });
     setFeedback({
       type: "success",
@@ -547,10 +701,14 @@ export default function App() {
   };
 
   const removePhoto = (id) => {
-    setSelectedPhotoIds((current) => current.filter((photoId) => photoId !== id));
     setPhotos((current) => {
       const target = current.find((photo) => photo.id === id);
-      if (target) URL.revokeObjectURL(target.url);
+      if (target) {
+        URL.revokeObjectURL(target.url);
+        if (target.thumbUrl) {
+          URL.revokeObjectURL(target.thumbUrl);
+        }
+      }
       const updated = current.filter((photo) => photo.id !== id);
       if (activeId === id) {
         setActiveId(updated[0]?.id ?? null);
@@ -691,67 +849,6 @@ export default function App() {
     }
   };
 
-  const updatePhotoEdits = (photoId, patch) => {
-    setPhotos((current) =>
-      current.map((photo) =>
-        photo.id === photoId
-          ? {
-              ...photo,
-              ...patch,
-              localEditRecipe: patch.localEditRecipe
-                ? makeLocalEditRecipe(patch.localEditRecipe)
-                : photo.localEditRecipe ?? makeLocalEditRecipe(),
-              saved: false,
-            }
-          : photo,
-      ),
-    );
-  };
-
-  const applyLocalRecipeToSelected = (recipe) => {
-    if (selectedPhotoIds.length === 0) return;
-    setPhotos((current) =>
-      current.map((photo) =>
-        selectedPhotoIds.includes(photo.id)
-          ? {
-              ...photo,
-              localEditRecipe: makeLocalEditRecipe(recipe),
-              saved: false,
-            }
-          : photo,
-      ),
-    );
-    showFeedback("success", `Ajuste local aplicado em ${selectedPhotoIds.length} foto(s).`);
-  };
-
-  const applyGlobalLookToScope = (scope) => {
-    if (scope === "all") {
-      setPhotos((current) =>
-        current.map((photo) => ({
-          ...photo,
-          disableGlobalLook: false,
-          saved: false,
-        })),
-      );
-      showFeedback("success", "Look global habilitado para todas as fotos.");
-      return;
-    }
-
-    if (selectedPhotoIds.length === 0) {
-      showFeedback("info", "Selecione fotos no editor para aplicar o look em lote.");
-      return;
-    }
-
-    setPhotos((current) =>
-      current.map((photo) =>
-        selectedPhotoIds.includes(photo.id)
-          ? { ...photo, disableGlobalLook: false, saved: false }
-          : photo,
-      ),
-    );
-    showFeedback("success", `Look global habilitado em ${selectedPhotoIds.length} foto(s).`);
-  };
-
   const exportStructuredZip = async () => {
     if (!plateImgObj) {
       setFeedback({ type: "error", message: "Envie a imagem da placa antes de exportar." });
@@ -779,14 +876,9 @@ export default function App() {
         const canvas = document.createElement("canvas");
         canvas.width = sourceImage.width;
         canvas.height = sourceImage.height;
-        renderPhotoToCanvas({
-          canvas,
-          sourceImage,
-          plateImage: plateImgObj,
-          photo,
-          globalRecipe: globalLookRecipe,
-          lut: activeLut,
-        });
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(sourceImage, 0, 0);
+        drawWarpedPlate(ctx, plateImgObj, photo.points);
 
         const blob = await new Promise((resolve, reject) => {
           canvas.toBlob(
@@ -799,13 +891,25 @@ export default function App() {
         zip.file(photo.relativePath, blob);
       }
 
-      const content = await zip.generateAsync({ type: "blob" });
-      const url = URL.createObjectURL(content);
+      const fileName = `placas-processadas-${Date.now()}.zip`;
+      const content = await zip.generateAsync({
+        type: "blob",
+        mimeType: "application/zip",
+        compression: "DEFLATE",
+        compressionOptions: { level: 6 },
+      });
+      const zipFile = new File([content], fileName, { type: "application/zip" });
+      const url = URL.createObjectURL(zipFile);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `placas_processadas_${Date.now()}.zip`;
+      link.download = fileName;
+      link.type = "application/zip";
+      document.body.append(link);
       link.click();
-      URL.revokeObjectURL(url);
+      window.setTimeout(() => {
+        URL.revokeObjectURL(url);
+        link.remove();
+      }, 30_000);
 
       setPhotos((current) =>
         current.map((photo) =>
@@ -822,21 +926,6 @@ export default function App() {
     } finally {
       setIsExporting(false);
     }
-  };
-
-  const openPostEditor = () => {
-    if (!activePhoto) {
-      showFeedback("info", "Abra uma foto para usar o editor pos.");
-      return;
-    }
-    startTransition(() => {
-      setIsPostEditorOpen(true);
-      setSelectedPhotoIds((current) => (current.length > 0 ? current : [activePhoto.id]));
-    });
-  };
-
-  const closePostEditor = () => {
-    setIsPostEditorOpen(false);
   };
 
   return (
@@ -867,7 +956,7 @@ export default function App() {
         isExporting={isExporting}
       />
 
-      <div className="relative z-10 flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row" ref={containerRef}>
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row">
         <EditorCanvas
           photos={photos}
           activePhoto={activePhoto}
@@ -875,7 +964,8 @@ export default function App() {
           navigatePhoto={navigatePhoto}
           mousePos={mousePos}
           activeDim={activeDim}
-          zoom={zoom}
+          resolvedZoom={resolvedZoom}
+          viewportSize={effectiveViewportSize}
           canvasRef={canvasRef}
           previewCanvasRef={previewCanvasRef}
           canvasScrollRef={canvasScrollRef}
@@ -895,56 +985,15 @@ export default function App() {
           activePhoto={activePhoto}
           activePhotoIndex={activePhotoIndex}
           totalPhotos={photos.length}
-          zoom={zoom}
-          setZoom={setZoom}
+          zoomLabel={zoomLabel}
+          setZoomToFit={() => setZoom(0)}
           applyZoomDelta={applyZoomDelta}
           clearPoints={clearPoints}
           selectedPointIndex={selectedPointIndex}
           setSelectedPointIndex={setSelectedPointIndex}
           moveSelectedPoint={moveSelectedPoint}
-          hasLocalEdits={activeHasLocalEdits}
-          hasGlobalLook={activeHasGlobalLook}
-          openPostEditor={openPostEditor}
         />
       </div>
-
-      <Suspense
-        fallback={
-          <div className="fixed inset-0 z-[60] grid place-items-center bg-[rgba(2,6,23,0.6)]">
-            <div className="flex items-center gap-3 rounded-full border border-white/10 bg-[rgba(6,11,24,0.92)] px-5 py-3 text-white shadow-xl">
-              <LoaderCircle className="h-5 w-5 animate-spin" />
-              Carregando editor pos...
-            </div>
-          </div>
-        }
-      >
-        {isPostEditorOpen ? (
-          <PostEditorModule
-            photos={photos}
-            activePhoto={activePhoto}
-            activeId={activeId}
-            setActiveId={setActiveId}
-            selectedPhotoIds={selectedPhotoIds}
-            setSelectedPhotoIds={setSelectedPhotoIds}
-            globalLookRecipe={globalLookRecipe}
-            setGlobalLookRecipe={setGlobalLookRecipe}
-            customLuts={customLuts}
-            setCustomLuts={setCustomLuts}
-            customPresets={customPresets}
-            setCustomPresets={setCustomPresets}
-            localClipboard={localClipboard}
-            setLocalClipboard={setLocalClipboard}
-            plateImgObj={plateImgObj}
-            globalLut={activeLut}
-            updatePhotoEdits={updatePhotoEdits}
-            applyLocalRecipeToSelected={applyLocalRecipeToSelected}
-            applyGlobalLookToScope={applyGlobalLookToScope}
-            exportStructuredZip={exportStructuredZip}
-            showFeedback={showFeedback}
-            closeEditor={closePostEditor}
-          />
-        ) : null}
-      </Suspense>
 
       <AnimatePresence>
         {feedback ? (
