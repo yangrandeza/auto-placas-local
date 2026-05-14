@@ -5,7 +5,7 @@ export function cn(...inputs) {
   return twMerge(clsx(inputs));
 }
 
-export const IMAGE_REGEX = /\.(jpg|jpeg|png)$/i;
+export const IMAGE_REGEX = /\.(jpg|jpeg|png|webp)$/i;
 
 export function makePhotoId() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID();

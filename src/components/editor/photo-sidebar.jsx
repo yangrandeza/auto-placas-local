@@ -105,7 +105,7 @@ export function PhotoSidebar({
               >
                 <Upload className="mb-3 h-5 w-5 text-cyan-100 transition group-hover:-translate-y-0.5" />
                 <span className="text-sm font-medium text-white">Selecionar template</span>
-                <span className="mt-1 text-xs text-[color:var(--muted-foreground)]">PNG, JPG ou JPEG</span>
+                <span className="mt-1 text-xs text-[color:var(--muted-foreground)]">PNG, JPG, JPEG ou WebP</span>
               </button>
               <input ref={plateInputRef} type="file" accept="image/*" className="hidden" onChange={onPlateUpload} />
 
