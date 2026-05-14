@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "scanned_at": "2026-05-14T21:12:12.549Z",
+  "files": [
+    {
+      "path": "README.md",
+      "title": "Auto Placas",
+      "summary": "Aplicacao React + Vite para aplicar template de placa em fotos com marcacao de 4 pontos, zoom, pan, lupa de precisao e exportacao em lote para ZIP. ```bash npm install npm run dev ``` ```bash npm r...",
+      "lines": 26,
+      "mtime": 1778793077829.7336
+    }
+  ]
+}

@@ -21,6 +21,7 @@ export default function App() {
   const [activeId, setActiveId] = useState(null);
   const [plateImgData, setPlateImgData] = useState(null);
   const [plateImgObj, setPlateImgObj] = useState(null);
+  const [plateDataUrl, setPlateDataUrl] = useState(null);
   const [activeImageObj, setActiveImageObj] = useState(null);
   const [activeDim, setActiveDim] = useState({ w: 0, h: 0 });
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
@@ -50,6 +51,8 @@ export default function App() {
   const fitZoomRef = useRef(1);
   const pendingZoomAnchorRef = useRef(null);
   const thumbnailQueueRef = useRef(new Set());
+  const imageWorkerRef = useRef(null);
+  const [exportProgress, setExportProgress] = useState({ current: 0, total: 0 });
 
   const activePhoto = photos.find((photo) => photo.id === activeId) ?? null;
   const deferredPhotos = useDeferredValue(photos);
@@ -194,6 +197,78 @@ export default function App() {
 
   useEffect(() => {
     photosRef.current = photos;
+  }, [photos]);
+
+  const downloadZip = (blobUrl, fileName) => {
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = fileName;
+    link.type = "application/zip";
+    document.body.append(link);
+    link.click();
+    window.setTimeout(() => {
+      URL.revokeObjectURL(blobUrl);
+      link.remove();
+    }, 30_000);
+  };
+
+  useEffect(() => {
+    const worker = new Worker(new URL("@/lib/image-worker.js", import.meta.url), { type: "module" });
+    imageWorkerRef.current = worker;
+
+    worker.onmessage = (event) => {
+      const { type, data } = event.data;
+
+      if (type === "THUMBNAIL_PROGRESS") {
+        setFeedback({ type: "info", message: `Preparando miniaturas... ${data.completed}/${data.total}` });
+      }
+
+      if (type === "THUMBNAILS_COMPLETE") {
+        const { results } = data;
+        setPhotos((current) =>
+          current.map((photo) => {
+            const result = results.find((r) => r.id === photo.id);
+            return result?.thumbUrl ? { ...photo, thumbUrl: result.thumbUrl } : photo;
+          }),
+        );
+      }
+
+      if (type === "PROCESS_PROGRESS") {
+        setExportProgress({ current: data.completed, total: data.total });
+      }
+
+      if (type === "PROCESS_COMPLETE") {
+        worker.postMessage({ type: "BUILD_ZIP", data: { results: data.results, plateDataUrl } });
+      }
+
+      if (type === "ZIP_PROGRESS") {
+        setExportProgress({ current: data.completed, total: data.total });
+      }
+
+      if (type === "ZIP_COMPLETE") {
+        downloadZip(data.blobUrl, data.fileName);
+        setPhotos((current) =>
+          current.map((photo) =>
+            photo.points.length === 4 ? { ...photo, saved: true } : photo,
+          ),
+        );
+        setIsExporting(false);
+        setExportProgress({ current: 0, total: 0 });
+        setFeedback({ type: "success", message: `${data.count} imagens exportadas no ZIP.` });
+      }
+    };
+
+    return () => worker.terminate();
+  }, [plateDataUrl]);
+
+  useEffect(() => {
+    const photosWithoutThumb = photos.filter((photo) => !photo.thumbUrl);
+    if (photosWithoutThumb.length === 0) return;
+
+    imageWorkerRef.current?.postMessage({
+      type: "CREATE_THUMBNAILS",
+      data: { photos: photosWithoutThumb },
+    });
   }, [photos]);
 
   useEffect(() => {
@@ -679,7 +754,11 @@ export default function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (loadEvent) => setPlateImgData(loadEvent.target?.result ?? null);
+    reader.onload = (loadEvent) => {
+      const dataUrl = loadEvent.target?.result ?? null;
+      setPlateImgData(dataUrl);
+      setPlateDataUrl(dataUrl);
+    };
     reader.readAsDataURL(file);
   };
 
@@ -862,69 +941,18 @@ export default function App() {
     }
 
     setIsExporting(true);
+    setExportProgress({ current: 0, total: photosToSave.length });
+
     try {
-      const zip = new JSZip();
-
-      for (const photo of photosToSave) {
-        const sourceImage = await new Promise((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => resolve(img);
-          img.onerror = reject;
-          img.src = photo.url;
-        });
-
-        const canvas = document.createElement("canvas");
-        canvas.width = sourceImage.width;
-        canvas.height = sourceImage.height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(sourceImage, 0, 0);
-        drawWarpedPlate(ctx, plateImgObj, photo.points);
-
-        const blob = await new Promise((resolve, reject) => {
-          canvas.toBlob(
-            (result) => (result ? resolve(result) : reject(new Error("Falha ao gerar imagem."))),
-            "image/jpeg",
-            0.95,
-          );
-        });
-
-        zip.file(photo.relativePath, blob);
-      }
-
-      const fileName = `placas-processadas-${Date.now()}.zip`;
-      const content = await zip.generateAsync({
-        type: "blob",
-        mimeType: "application/zip",
-        compression: "DEFLATE",
-        compressionOptions: { level: 6 },
-      });
-      const zipFile = new File([content], fileName, { type: "application/zip" });
-      const url = URL.createObjectURL(zipFile);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = fileName;
-      link.type = "application/zip";
-      document.body.append(link);
-      link.click();
-      window.setTimeout(() => {
-        URL.revokeObjectURL(url);
-        link.remove();
-      }, 30_000);
-
-      setPhotos((current) =>
-        current.map((photo) =>
-          photo.points.length === 4 ? { ...photo, saved: true } : photo,
-        ),
-      );
-      setFeedback({
-        type: "success",
-        message: `${photosToSave.length} imagem${photosToSave.length > 1 ? "ns" : ""} exportada${photosToSave.length > 1 ? "s" : ""} no ZIP.`,
+      imageWorkerRef.current?.postMessage({
+        type: "PROCESS_PHOTOS",
+        data: { photos: photosToSave, plateDataUrl },
       });
     } catch (error) {
       console.error(error);
-      setFeedback({ type: "error", message: "Erro ao gerar o ZIP." });
-    } finally {
+      setFeedback({ type: "error", message: "Erro ao iniciar processamento." });
       setIsExporting(false);
+      setExportProgress({ current: 0, total: 0 });
     }
   };
 
@@ -994,6 +1022,22 @@ export default function App() {
           moveSelectedPoint={moveSelectedPoint}
         />
       </div>
+
+      {isExporting && exportProgress.total > 0 && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="w-64 rounded-2xl border border-white/10 bg-[rgba(6,11,24,0.95)] p-6 shadow-2xl">
+            <div className="text-center text-sm font-medium text-white mb-3">
+              Processando {exportProgress.current}/{exportProgress.total}
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-white/10">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-cyan-300 transition-all duration-300"
+                style={{ width: `${(exportProgress.current / exportProgress.total) * 100}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       <AnimatePresence>
         {feedback ? (
