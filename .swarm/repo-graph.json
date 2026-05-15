@@ -19,7 +19,7 @@
         "@/lib/utils"
       ],
       "language": "javascript",
-      "mtime": "2026-05-14T21:31:00.044Z"
+      "mtime": "2026-05-15T15:07:18.840Z"
     },
     "C:/Users/Lite OS/Downloads/auto-placas-local/src/components/editor/editor-canvas.jsx": {
       "filePath": "C:\\Users\\Lite OS\\Downloads\\auto-placas-local\\src\\components\\editor\\editor-canvas.jsx",
@@ -187,7 +187,7 @@
     }
   ],
   "metadata": {
-    "generatedAt": "2026-05-14T21:31:00.079Z",
+    "generatedAt": "2026-05-15T15:07:18.947Z",
     "generator": "repo-graph",
     "nodeCount": 12,
     "edgeCount": 2

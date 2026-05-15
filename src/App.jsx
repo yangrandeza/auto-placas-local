@@ -231,6 +231,7 @@ export default function App() {
             return result?.thumbUrl ? { ...photo, thumbUrl: result.thumbUrl } : photo;
           }),
         );
+        thumbnailQueueRef.current.clear();
       }
 
       if (type === "PROCESS_PROGRESS") {
@@ -262,60 +263,16 @@ export default function App() {
   }, [plateDataUrl]);
 
   useEffect(() => {
-    const photosWithoutThumb = photos.filter((photo) => !photo.thumbUrl);
+    const photosWithoutThumb = photos.filter(
+      (photo) => !photo.thumbUrl && !thumbnailQueueRef.current.has(photo.id),
+    );
     if (photosWithoutThumb.length === 0) return;
 
+    photosWithoutThumb.forEach((p) => thumbnailQueueRef.current.add(p.id));
     imageWorkerRef.current?.postMessage({
       type: "CREATE_THUMBNAILS",
       data: { photos: photosWithoutThumb },
     });
-  }, [photos]);
-
-  useEffect(() => {
-    const pendingPhotos = photos
-      .filter((photo) => !photo.thumbUrl && !thumbnailQueueRef.current.has(photo.id))
-      .slice(0, 2);
-    if (pendingPhotos.length === 0) return undefined;
-
-    let cancelled = false;
-    const scheduleThumbnailWork = window.requestIdleCallback
-      ? window.requestIdleCallback.bind(window)
-      : (callback) => window.setTimeout(callback, 80);
-    const cancelThumbnailWork = window.cancelIdleCallback
-      ? window.cancelIdleCallback.bind(window)
-      : window.clearTimeout.bind(window);
-
-    const jobId = scheduleThumbnailWork(async () => {
-      for (const photo of pendingPhotos) {
-        thumbnailQueueRef.current.add(photo.id);
-        let thumbUrl = null;
-
-        try {
-          thumbUrl = await createThumbnailUrl(photo.file);
-          if (cancelled || !thumbUrl) continue;
-
-          setPhotos((current) =>
-            current.map((currentPhoto) =>
-              currentPhoto.id === photo.id
-                ? { ...currentPhoto, thumbUrl }
-                : currentPhoto,
-            ),
-          );
-        } catch (error) {
-          console.error("Falha ao gerar miniatura", error);
-          if (thumbUrl) {
-            URL.revokeObjectURL(thumbUrl);
-          }
-        } finally {
-          thumbnailQueueRef.current.delete(photo.id);
-        }
-      }
-    });
-
-    return () => {
-      cancelled = true;
-      cancelThumbnailWork(jobId);
-    };
   }, [photos]);
 
   const showFeedback = (type, message) => {
