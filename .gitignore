@@ -3,4 +3,5 @@ dist/
 .DS_Store
 *.log
 .codex/
+.swarm/
 tmp-test-assets/
