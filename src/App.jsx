@@ -10,7 +10,6 @@ import {
   IMAGE_REGEX,
   clamp,
   createPhotoRecord,
-  createThumbnailUrl,
   drawWarpedPlate,
   findNearestPointIndex,
   revokePhotoUrls,
@@ -51,6 +50,7 @@ export default function App() {
   const fitZoomRef = useRef(1);
   const pendingZoomAnchorRef = useRef(null);
   const thumbnailQueueRef = useRef(new Set());
+  const thumbnailErrorRef = useRef(new Set());
   const imageWorkerRef = useRef(null);
   const [exportProgress, setExportProgress] = useState({ current: 0, total: 0 });
 
@@ -105,6 +105,10 @@ export default function App() {
 
   const resolvedZoom = zoom === 0 ? fitZoom : zoom;
   const zoomLabel = zoom === 0 ? "FIT" : `${Math.round(resolvedZoom * 100)}%`;
+  const pointBleed = useMemo(() => {
+    if (activeDim.w <= 0 || activeDim.h <= 0) return 0;
+    return Math.ceil(Math.max(240, Math.max(activeDim.w, activeDim.h) * 0.35));
+  }, [activeDim.h, activeDim.w]);
 
   const queueZoomAnchor = useCallback((anchorClientPoint) => {
     const container = canvasScrollRef.current;
@@ -225,10 +229,17 @@ export default function App() {
 
       if (type === "THUMBNAILS_COMPLETE") {
         const { results } = data;
+        results.forEach((result) => {
+          if (result?.thumbBlob) {
+            thumbnailErrorRef.current.delete(result.id);
+          } else {
+            thumbnailErrorRef.current.add(result.id);
+          }
+        });
         setPhotos((current) =>
           current.map((photo) => {
             const result = results.find((r) => r.id === photo.id);
-            return result?.thumbUrl ? { ...photo, thumbUrl: result.thumbUrl } : photo;
+            return result?.thumbBlob ? { ...photo, thumbUrl: URL.createObjectURL(result.thumbBlob) } : photo;
           }),
         );
         thumbnailQueueRef.current.clear();
@@ -264,7 +275,10 @@ export default function App() {
 
   useEffect(() => {
     const photosWithoutThumb = photos.filter(
-      (photo) => !photo.thumbUrl && !thumbnailQueueRef.current.has(photo.id),
+      (photo) =>
+        !photo.thumbUrl &&
+        !thumbnailQueueRef.current.has(photo.id) &&
+        !thumbnailErrorRef.current.has(photo.id),
     );
     if (photosWithoutThumb.length === 0) return;
 
@@ -429,8 +443,12 @@ export default function App() {
     if (canvas.width !== activeImageObj.width || canvas.height !== activeImageObj.height) {
       canvas.width = activeImageObj.width;
       canvas.height = activeImageObj.height;
-      preview.width = activeImageObj.width;
-      preview.height = activeImageObj.height;
+    }
+    const previewWidth = activeImageObj.width + pointBleed * 2;
+    const previewHeight = activeImageObj.height + pointBleed * 2;
+    if (preview.width !== previewWidth || preview.height !== previewHeight) {
+      preview.width = previewWidth;
+      preview.height = previewHeight;
     }
 
     const ctx = canvas.getContext("2d");
@@ -440,15 +458,17 @@ export default function App() {
     if (activePhoto.points.length === 4 && plateImgObj) {
       drawWarpedPlate(ctx, plateImgObj, activePhoto.points);
     }
-  }, [activeImageObj, activePhoto, plateImgObj]);
+  }, [activeImageObj, activePhoto, plateImgObj, pointBleed]);
 
   useEffect(() => {
     if (!previewCanvasRef.current || !activeImageObj || !activePhoto) return;
 
     const canvas = previewCanvasRef.current;
     const ctx = canvas.getContext("2d");
-    const width = canvas.width;
+    const width = activeImageObj.width;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.translate(pointBleed, pointBleed);
 
     const points = activePhoto.points;
     if (points.length > 0) {
@@ -488,7 +508,8 @@ export default function App() {
       ctx.font = `bold ${fontSize}px "IBM Plex Sans", sans-serif`;
       ctx.fillText(String(index + 1), point.x + fontSize * 0.8, point.y - fontSize * 0.6);
     });
-  }, [activeImageObj, activePhoto, mousePos, selectedPointIndex]);
+    ctx.restore();
+  }, [activeImageObj, activePhoto, mousePos, pointBleed, selectedPointIndex]);
 
   useEffect(() => {
     const nativeWheelHandler = (event) => {
@@ -532,8 +553,8 @@ export default function App() {
     );
     lupaCtx.drawImage(
       previewCanvasRef.current,
-      mousePos.x - source / 2,
-      mousePos.y - source / 2,
+      mousePos.x + pointBleed - source / 2,
+      mousePos.y + pointBleed - source / 2,
       source,
       source,
       0,
@@ -549,7 +570,7 @@ export default function App() {
     lupaCtx.moveTo(0, size / 2);
     lupaCtx.lineTo(size, size / 2);
     lupaCtx.stroke();
-  }, [mousePos, activePhoto, selectedPointIndex]);
+  }, [mousePos, activePhoto, pointBleed, selectedPointIndex]);
 
   useEffect(
     () => () => {
@@ -639,14 +660,14 @@ export default function App() {
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
     return {
-      x: ((event.clientX - rect.left) * canvas.width) / rect.width,
-      y: ((event.clientY - rect.top) * canvas.height) / rect.height,
+      x: ((event.clientX - rect.left) * canvas.width) / rect.width - pointBleed,
+      y: ((event.clientY - rect.top) * canvas.height) / rect.height - pointBleed,
     };
   };
 
-  const constrainPointToCanvas = (point) => ({
-    x: clamp(point.x, 0, activeDim.w),
-    y: clamp(point.y, 0, activeDim.h),
+  const constrainPointToEditableArea = (point) => ({
+    x: clamp(point.x, -pointBleed, activeDim.w + pointBleed),
+    y: clamp(point.y, -pointBleed, activeDim.h + pointBleed),
   });
 
   const getSnappedPoint = (rawPoint, points) => {
@@ -669,7 +690,7 @@ export default function App() {
       activePhoto.id,
       activePhoto.points.map((point, index) =>
         index === selectedPointIndex
-          ? constrainPointToCanvas({ x: point.x + dx, y: point.y + dy })
+          ? constrainPointToEditableArea({ x: point.x + dx, y: point.y + dy })
           : point,
       ),
     );
@@ -678,7 +699,7 @@ export default function App() {
       saved: false,
       points: photo.points.map((point, index) =>
         index === selectedPointIndex
-          ? constrainPointToCanvas({ x: point.x + dx, y: point.y + dy })
+          ? constrainPointToEditableArea({ x: point.x + dx, y: point.y + dy })
           : point,
       ),
     }));
@@ -772,7 +793,7 @@ export default function App() {
   const handleCanvasClick = (event) => {
     if (!activePhoto || draggingPointIndex >= 0 || isSpaceDown || isPanning) return;
 
-    const rawPoint = constrainPointToCanvas(getCanvasCoords(event));
+    const rawPoint = constrainPointToEditableArea(getCanvasCoords(event));
     const nearestIndex = findNearestPointIndex(
       activePhoto.points,
       rawPoint,
@@ -786,7 +807,7 @@ export default function App() {
 
     if (activePhoto.points.length >= 4) return;
 
-    const snapped = constrainPointToCanvas(getSnappedPoint(rawPoint, activePhoto.points));
+    const snapped = constrainPointToEditableArea(getSnappedPoint(rawPoint, activePhoto.points));
     pushPointHistorySnapshot(activePhoto.id, [...activePhoto.points, snapped]);
     updateActivePhoto((photo) => ({
       ...photo,
@@ -811,7 +832,7 @@ export default function App() {
       return;
     }
 
-    const point = constrainPointToCanvas(getCanvasCoords(event));
+    const point = constrainPointToEditableArea(getCanvasCoords(event));
     const nearestIndex = findNearestPointIndex(
       activePhoto.points,
       point,
@@ -836,7 +857,7 @@ export default function App() {
       return;
     }
 
-    const point = constrainPointToCanvas(getCanvasCoords(event));
+    const point = constrainPointToEditableArea(getCanvasCoords(event));
     setMousePos(point);
 
     if (draggingPointIndex < 0) return;
@@ -949,6 +970,7 @@ export default function App() {
           navigatePhoto={navigatePhoto}
           mousePos={mousePos}
           activeDim={activeDim}
+          pointBleed={pointBleed}
           resolvedZoom={resolvedZoom}
           viewportSize={effectiveViewportSize}
           canvasRef={canvasRef}

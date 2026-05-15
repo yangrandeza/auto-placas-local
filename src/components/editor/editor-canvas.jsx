@@ -12,6 +12,7 @@ export function EditorCanvas({
   navigatePhoto,
   mousePos,
   activeDim,
+  pointBleed,
   resolvedZoom,
   viewportSize,
   canvasRef,
@@ -51,10 +52,15 @@ export function EditorCanvas({
 
   const canvasWidth = Math.max(activeDim.w * resolvedZoom, 1);
   const canvasHeight = Math.max(activeDim.h * resolvedZoom, 1);
-  const stageWidth = Math.max(canvasWidth, viewportSize.width || 0);
-  const stageHeight = Math.max(canvasHeight, viewportSize.height || 0);
-  const offsetX = canvasWidth < stageWidth ? (stageWidth - canvasWidth) / 2 : 0;
-  const offsetY = canvasHeight < stageHeight ? (stageHeight - canvasHeight) / 2 : 0;
+  const bleedSize = Math.max(pointBleed * resolvedZoom, 0);
+  const markableWidth = canvasWidth + bleedSize * 2;
+  const markableHeight = canvasHeight + bleedSize * 2;
+  const stageWidth = Math.max(markableWidth, viewportSize.width || 0);
+  const stageHeight = Math.max(markableHeight, viewportSize.height || 0);
+  const offsetX = markableWidth < stageWidth ? (stageWidth - markableWidth) / 2 : 0;
+  const offsetY = markableHeight < stageHeight ? (stageHeight - markableHeight) / 2 : 0;
+  const imageLeft = offsetX + bleedSize;
+  const imageTop = offsetY + bleedSize;
 
   return (
     <main className="relative z-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -136,24 +142,30 @@ export function EditorCanvas({
             }}
           >
             <div
-              className="absolute overflow-hidden rounded-[20px] border border-white/10 bg-black/30 shadow-[0_40px_140px_rgba(0,0,0,0.4)] sm:rounded-[28px]"
+              className="absolute overflow-visible rounded-[20px] border border-white/10 bg-black/30 shadow-[0_40px_140px_rgba(0,0,0,0.4)] sm:rounded-[28px]"
               style={{
-                left: `${offsetX}px`,
-                top: `${offsetY}px`,
+                left: `${imageLeft}px`,
+                top: `${imageTop}px`,
                 width: `${canvasWidth}px`,
                 height: `${canvasHeight}px`,
               }}
             >
-              <canvas ref={canvasRef} className="pointer-events-none block h-full w-full" />
+              <canvas ref={canvasRef} className="pointer-events-none block h-full w-full rounded-[20px] sm:rounded-[28px]" />
               <canvas
                 ref={previewCanvasRef}
-                className={`absolute inset-0 block h-full w-full ${
+                className={`absolute block ${
                   isSpaceDown || isPanning
                     ? "cursor-grab"
                     : selectedPointIndex >= 0
                       ? "cursor-grab active:cursor-grabbing"
                       : "cursor-crosshair"
                 }`}
+                style={{
+                  left: `${-bleedSize}px`,
+                  top: `${-bleedSize}px`,
+                  width: `${markableWidth}px`,
+                  height: `${markableHeight}px`,
+                }}
                 onClick={handleCanvasClick}
                 onPointerDown={handleCanvasPointerDown}
                 onPointerMove={handleCanvasPointerMove}

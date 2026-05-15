@@ -17,10 +17,10 @@ self.onmessage = async (event) => {
         const batchResults = await Promise.all(
           batch.map(async (photo) => {
             try {
-              const thumbUrl = await createThumbnailInWorker(photo.file);
-              return { id: photo.id, thumbUrl };
+              const thumbBlob = await createThumbnailInWorker(photo.file);
+              return { id: photo.id, thumbBlob };
             } catch (error) {
-              return { id: photo.id, thumbUrl: null, error: true };
+              return { id: photo.id, thumbBlob: null, error: true };
             }
           }),
         );
@@ -39,7 +39,7 @@ self.onmessage = async (event) => {
     case "PROCESS_PHOTOS": {
       const { photos, plateDataUrl } = data;
       const results = [];
-      const plateImg = await loadImage(plateDataUrl);
+      const plateImg = await loadImageBitmap(plateDataUrl);
 
       for (let i = 0; i < photos.length; i++) {
         const photo = photos[i];
@@ -59,12 +59,12 @@ self.onmessage = async (event) => {
       }
 
       self.postMessage({ type: "PROCESS_COMPLETE", data: { results }, jobId });
+      plateImg.close?.();
       break;
     }
 
     case "BUILD_ZIP": {
       const { results } = data;
-      const JSZip = self.JSZip;
       const zip = new JSZip();
       const validResults = results.filter((r) => r.blob && !r.error);
 
@@ -101,78 +101,63 @@ self.onmessage = async (event) => {
   }
 };
 
-async function loadImage(dataUrl) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = dataUrl;
-  });
+async function loadImageBitmap(dataUrl) {
+  if (typeof createImageBitmap !== "function") {
+    throw new Error("createImageBitmap is not available in this worker");
+  }
+
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  return createImageBitmap(blob);
 }
 
 async function createThumbnailInWorker(file, maxSize = 220) {
   let sourceImage = null;
-  let temporaryUrl = null;
 
   if (typeof createImageBitmap === "function") {
     sourceImage = await createImageBitmap(file);
   } else {
-    temporaryUrl = URL.createObjectURL(file);
-    sourceImage = await new Promise((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = reject;
-      image.src = temporaryUrl;
-    });
+    throw new Error("createImageBitmap is not available in this worker");
   }
 
   const scale = Math.min(maxSize / sourceImage.width, maxSize / sourceImage.height, 1);
   const width = Math.max(1, Math.round(sourceImage.width * scale));
   const height = Math.max(1, Math.round(sourceImage.height * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
+  if (typeof OffscreenCanvas !== "function") {
+    sourceImage.close?.();
+    throw new Error("OffscreenCanvas is not available in this worker");
+  }
+
+  const canvas = new OffscreenCanvas(width, height);
 
   const ctx = canvas.getContext("2d", { alpha: false });
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(sourceImage, 0, 0, width, height);
   sourceImage.close?.();
-  if (temporaryUrl) {
-    URL.revokeObjectURL(temporaryUrl);
-  }
+  const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.78 });
 
-  const blob = await new Promise((resolve) => {
-    canvas.toBlob(resolve, "image/jpeg", 0.78);
-  });
-
-  return blob ? URL.createObjectURL(blob) : null;
+  return blob;
 }
 
 async function processPhotoWithPlate(photo, plateImg) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = async () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0);
-      drawWarpedPlate(ctx, plateImg, photo.points);
+  if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") {
+    throw new Error("Worker image processing is not available");
+  }
 
-      const blob = await new Promise((res) => {
-        canvas.toBlob(res, "image/jpeg", 0.95);
-      });
+  const img = await createImageBitmap(photo.file);
+  const canvas = new OffscreenCanvas(img.width, img.height);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0);
+  drawWarpedPlate(ctx, plateImg, photo.points);
+  img.close?.();
 
-      if (blob) {
-        resolve(blob);
-      } else {
-        reject(new Error("Failed to create blob"));
-      }
-    };
-    img.onerror = () => reject(new Error("Failed to load image"));
-    img.src = photo.url;
-  });
+  const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.95 });
+  if (!blob) {
+    throw new Error("Failed to create blob");
+  }
+
+  return blob;
 }
 
 function drawWarpedPlate(ctx, plate, points) {
